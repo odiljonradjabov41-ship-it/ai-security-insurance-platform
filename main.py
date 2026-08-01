@@ -5,7 +5,7 @@ import joblib
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -244,7 +244,6 @@ async def get_dashboard():
                 <tbody>
                     {logs_rows}
                 </tbody>
-            </tbody>
             </table>
         </div>
     </body>
@@ -263,13 +262,15 @@ async def protected_chat(request: AIRequest):
     attack_vector = check_regex_attack(raw_prompt)
     if attack_vector:
         log_event(raw_prompt, clean_prompt, attack_vector, 1.0, "BLOCKED")
-        raise HTTPException(
+        return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "status": "BLOCKED",
-                "reason": f"Security Policy Violation: {attack_vector}",
-                "detection_type": "Static Insurance Guardrail",
-                "risk_score": 1.0
+            content={
+                "detail": {
+                    "status": "BLOCKED",
+                    "reason": f"Security Policy Violation: {attack_vector}",
+                    "detection_type": "Static Insurance Guardrail",
+                    "risk_score": 1.0
+                }
             }
         )
 
@@ -277,13 +278,15 @@ async def protected_chat(request: AIRequest):
     ml_res = check_ml_attack(raw_prompt)
     if ml_res["is_attack"]:
         log_event(raw_prompt, clean_prompt, "Semantic Prompt Injection", ml_res["score"], "BLOCKED")
-        raise HTTPException(
+        return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "status": "BLOCKED",
-                "reason": "Semantic Threat Detected (Prompt Injection / Fraud)",
-                "detection_type": "Machine Learning Classifier",
-                "risk_score": ml_res["score"]
+            content={
+                "detail": {
+                    "status": "BLOCKED",
+                    "reason": "Semantic Threat Detected (Prompt Injection / Fraud)",
+                    "detection_type": "Machine Learning Classifier",
+                    "risk_score": ml_res["score"]
+                }
             }
         )
 

@@ -1,5 +1,5 @@
 import os
-import asyncio
+import logging
 import httpx
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
@@ -8,48 +8,77 @@ from dotenv import load_dotenv
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-API_URL = os.getenv("API_URL", "http://127.0.0.1:8080/v1/chat/protected")
+API_URL = "http://127.0.0.1:8080/v1/chat/protected"
+
+logging.basicConfig(level=logging.INFO)
+
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN topilmadi! .env faylini tekshiring.")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 @dp.message(Command("start"))
-async def start_handler(message: types.Message):
+async def start_cmd(message: types.Message):
     await message.answer(
-        "👋 Xush kelibsiz! Men **AI Security Guardrail Bot**man.\n\n"
-        "Menga ixtiyoriy matn yuboring, men uni AI Security Engine orqali tekshirib beraman."
+        "👋 **InsurTech AI Security Botiga xush kelibsiz!**\n\n"
+        "Menga sug'urta bo'yicha savollaringizni yoki ma'lumotlaringizni yuboring. "
+        "Tizim har bir so'rovni kiberxavfsizlik va DLP süzgichidan o'tkazadi."
     )
 
 @dp.message()
-async def process_prompt(message: types.Message):
-    user_prompt = message.text
-    async with httpx.AsyncClient() as client:
+async def handle_message(message: types.Message):
+    user_text = message.text
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
         try:
-            response = await client.post(API_URL, json={"user_prompt": user_prompt}, timeout=10.0)
-            if response.status_code == 200:
+            response = await client.post(API_URL, json={"user_prompt": user_text})
+            
+            # JSON formatida javob kelganini tekshirish
+            try:
                 data = response.json()
+            except Exception:
+                await message.answer(f"⚠️ Serverdan kutilmagan javob keldi (Status: {response.status_code}). Server loglarini tekshiring.")
+                return
+
+            # Agar API 200 (Success) qaytarsa
+            if response.status_code == 200:
+                clean_prompt = data.get("clean_prompt_sent_to_ai", user_text)
+                risk_score = data.get("ai_risk_score", 0.0)
+                ai_resp = data.get("ai_response", "")
+                
                 await message.answer(
-                    f"✅ **STATUS: ALLOWED**\n\n"
-                    f"🟢 **Tozalangan Prompt:** `{data['clean_prompt_sent_to_ai']}`\n"
-                    f"📊 **Risk Score:** `{data['ai_risk_score']}`\n\n"
-                    f"🤖 **AI Javobi:** {data['ai_response']}",
+                    f"✅ **So'rov Xavfsiz deb Topildi**\n\n"
+                    f"🛡️ **DLP Maskalangan matn:**\n`{clean_prompt}`\n\n"
+                    f"📊 **Risk Score:** `{risk_score}`\n\n"
+                    f"🤖 **AI Javobi:** {ai_resp}",
+                    parse_mode="Markdown"
+                )
+            
+            # Agar API 400 (BLOCKED) qaytarsa
+            elif response.status_code == 400:
+                detail = data.get("detail", {})
+                reason = detail.get("reason", "Xavfsizlik siyosati buzildi")
+                detection = detail.get("detection_type", "Guardrail Engine")
+                risk = detail.get("risk_score", 1.0)
+                
+                await message.answer(
+                    f"🚨 **SO'ROV BLOKLANDI! (THREAT DETECTED)**\n\n"
+                    f"❌ **Sabab:** {reason}\n"
+                    f"🔍 **Aniqladi:** {detection}\n"
+                    f"⚠️ **Xavf Darajasi:** {risk}\n\n"
+                    f"_Ushbu hodisa kiberxavfsizlik jurnaliga (Dashboard) qayd etildi._",
                     parse_mode="Markdown"
                 )
             else:
-                err_data = response.json().get("detail", {})
-                await message.answer(
-                    f"🛑 **STATUS: BLOCKED**\n\n"
-                    f"⚠️ **Sababi:** {err_data.get('reason')}\n"
-                    f"🔍 **Aniqlash turi:** {err_data.get('detection_type')}\n"
-                    f"📊 **Risk Score:** `{err_data.get('risk_score')}`",
-                    parse_mode="Markdown"
-                )
-        except Exception as e:
-            await message.answer(f"❌ Xatolik yuz berdi: {str(e)}")
+                await message.answer(f"⚠️ Noma'lum server javobi: Status {response.status_code}")
 
-async def main():
-    print("🤖 Telegram Bot ishga tushdi...")
-    await dp.start_polling(bot)
+        except httpx.RequestError:
+            await message.answer("❌ **Xatolik:** Security API Serveriga (`main.py`) ulanib bo'lmadi. `main.py` ishlayotganini tekshiring!")
+        except Exception as ex:
+            await message.answer(f"❌ Kutilmagan xatolik: {str(ex)}")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    import asyncio
+    print("🤖 InsurTech AI Guardrail Bot ishga tushdi...")
+    asyncio.run(dp.start_polling(bot))
