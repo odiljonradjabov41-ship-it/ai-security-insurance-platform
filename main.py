@@ -2,6 +2,8 @@ import os
 import re
 import sqlite3
 import joblib
+import asyncio
+import threading
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,6 +13,9 @@ from dotenv import load_dotenv
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.naive_bayes import MultinomialNB
 from sklearn.pipeline import make_pipeline
+
+# Telegram Bot modulini import qilish
+from bot import bot, dp
 
 load_dotenv()
 
@@ -162,14 +167,29 @@ def train_and_save_model():
     return pipeline
 
 def load_ml_model():
-    # Model har safar yangi dataset bilan o'qitilishini ta'minlash
     return train_and_save_model()
+
+# --- BOTNI BACKGROUND (THREAD) REJIMIDA ISHGA TUSHIRISH ---
+def start_bot_thread():
+    """Telegram botni alohida oqimda (thread) 24/7 ishga tushirish"""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        print("🤖 Telegram Bot bulutli serverda bepul (0$) fonda ishga tushdi...")
+        loop.run_until_complete(dp.start_polling(bot))
+    except Exception as e:
+        print(f"❌ Bot Xatoligi: {e}")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
     global ml_pipeline
     ml_pipeline = load_ml_model()
+    
+    # FastAPI server ishga tushishi bilan Botni ham fonda yurgizish
+    bot_thread = threading.Thread(target=start_bot_thread, daemon=True)
+    bot_thread.start()
+    
     yield
 
 app = FastAPI(title="Enterprise InsurTech AI Security Platform", version="5.0.0", lifespan=lifespan)
