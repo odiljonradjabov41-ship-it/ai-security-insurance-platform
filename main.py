@@ -3,7 +3,7 @@ import re
 import sqlite3
 import joblib
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
@@ -16,6 +16,7 @@ load_dotenv()
 
 MODEL_FILE = "guardrail_model.pkl"
 DB_FILE = "security_platform.db"
+ml_pipeline = None
 
 # --- 1. ENTERPRISE SQLITE DATABASE ---
 def init_db():
@@ -36,14 +37,17 @@ def init_db():
     conn.close()
 
 def log_event(prompt: str, sanitized_prompt: str, attack_vector: str, risk_score: float, status_str: str):
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute(
-        "INSERT INTO logs (prompt, sanitized_prompt, attack_vector, risk_score, status) VALUES (?, ?, ?, ?, ?)",
-        (prompt, sanitized_prompt, attack_vector, risk_score, status_str)
-    )
-    conn.commit()
-    conn.close()
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO logs (prompt, sanitized_prompt, attack_vector, risk_score, status) VALUES (?, ?, ?, ?, ?)",
+            (prompt, sanitized_prompt, attack_vector, risk_score, status_str)
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"❌ DB Log Error: {e}")
 
 def get_stats():
     conn = sqlite3.connect(DB_FILE)
@@ -112,7 +116,10 @@ def train_and_save_model():
 
 def load_ml_model():
     if os.path.exists(MODEL_FILE):
-        return joblib.load(MODEL_FILE)
+        try:
+            return joblib.load(MODEL_FILE)
+        except Exception:
+            return train_and_save_model()
     else:
         return train_and_save_model()
 
@@ -164,8 +171,17 @@ def check_regex_attack(prompt: str) -> str:
     return None
 
 def check_ml_attack(prompt: str) -> dict:
-    prob = ml_pipeline.predict_proba([prompt])[0][1]
-    risk_score = round(float(prob), 4)
+    global ml_pipeline
+    if ml_pipeline is None:
+        ml_pipeline = load_ml_model()
+    
+    try:
+        prob = ml_pipeline.predict_proba([prompt])[0][1]
+        risk_score = round(float(prob), 4)
+    except Exception as e:
+        print(f"⚠️ ML Prediction Warning: {e}")
+        risk_score = 0.0
+
     return {
         "is_attack": risk_score >= 0.5,
         "score": risk_score
@@ -253,51 +269,58 @@ async def get_dashboard():
 # --- 6. PROTECTED API ENDPOINT ---
 @app.post("/v1/chat/protected")
 async def protected_chat(request: AIRequest):
-    raw_prompt = request.user_prompt
+    try:
+        raw_prompt = request.user_prompt
 
-    # 1. DLP Masking
-    clean_prompt = sanitize_insurance_data(raw_prompt)
+        # 1. DLP Masking
+        clean_prompt = sanitize_insurance_data(raw_prompt)
 
-    # 2. Static Attack Vector Check
-    attack_vector = check_regex_attack(raw_prompt)
-    if attack_vector:
-        log_event(raw_prompt, clean_prompt, attack_vector, 1.0, "BLOCKED")
-        return JSONResponse(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            content={
-                "detail": {
-                    "status": "BLOCKED",
-                    "reason": f"Security Policy Violation: {attack_vector}",
-                    "detection_type": "Static Insurance Guardrail",
-                    "risk_score": 1.0
+        # 2. Static Attack Vector Check
+        attack_vector = check_regex_attack(raw_prompt)
+        if attack_vector:
+            log_event(raw_prompt, clean_prompt, attack_vector, 1.0, "BLOCKED")
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={
+                    "detail": {
+                        "status": "BLOCKED",
+                        "reason": f"Security Policy Violation: {attack_vector}",
+                        "detection_type": "Static Insurance Guardrail",
+                        "risk_score": 1.0
+                    }
                 }
-            }
-        )
+            )
 
-    # 3. Dynamic ML Semantic Check
-    ml_res = check_ml_attack(raw_prompt)
-    if ml_res["is_attack"]:
-        log_event(raw_prompt, clean_prompt, "Semantic Prompt Injection", ml_res["score"], "BLOCKED")
-        return JSONResponse(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            content={
-                "detail": {
-                    "status": "BLOCKED",
-                    "reason": "Semantic Threat Detected (Prompt Injection / Fraud)",
-                    "detection_type": "Machine Learning Classifier",
-                    "risk_score": ml_res["score"]
+        # 3. Dynamic ML Semantic Check
+        ml_res = check_ml_attack(raw_prompt)
+        if ml_res["is_attack"]:
+            log_event(raw_prompt, clean_prompt, "Semantic Prompt Injection", ml_res["score"], "BLOCKED")
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={
+                    "detail": {
+                        "status": "BLOCKED",
+                        "reason": "Semantic Threat Detected (Prompt Injection / Fraud)",
+                        "detection_type": "Machine Learning Classifier",
+                        "risk_score": ml_res["score"]
+                    }
                 }
-            }
-        )
+            )
 
-    # 4. Passed All Checks
-    log_event(raw_prompt, clean_prompt, "None (Clean Request)", ml_res["score"], "ALLOWED")
-    return {
-        "status": "ALLOWED",
-        "clean_prompt_sent_to_ai": clean_prompt,
-        "ai_risk_score": ml_res["score"],
-        "ai_response": f"InsurTech AI Javobi: '{clean_prompt}' so'rovi xavfsiz deb topildi va qayta ishlandi."
-    }
+        # 4. Passed All Checks
+        log_event(raw_prompt, clean_prompt, "None (Clean Request)", ml_res["score"], "ALLOWED")
+        return {
+            "status": "ALLOWED",
+            "clean_prompt_sent_to_ai": clean_prompt,
+            "ai_risk_score": ml_res["score"],
+            "ai_response": f"InsurTech AI Javobi: '{clean_prompt}' so'rovi xavfsiz deb topildi va qayta ishlandi."
+        }
+    except Exception as ex:
+        print(f"❌ Server Error: {ex}")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"detail": {"status": "ERROR", "message": str(ex)}}
+        )
 
 if __name__ == "__main__":
     import uvicorn
