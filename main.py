@@ -5,10 +5,11 @@ import joblib
 import asyncio
 import threading
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, status
+from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi.security import APIKeyHeader
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.naive_bayes import MultinomialNB
@@ -24,6 +25,22 @@ SQLITE_DB = "security_platform.db"
 POSTGRES_URL = os.getenv("DATABASE_URL")  # Real serverda PostgreSQL ulanish kodi
 
 ml_pipeline = None
+
+# --- API KEY AUTHENTICATION SYSTEM ---
+API_KEY_NAME = "X-API-Key"
+api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False)
+
+# Render.com Environment Variable bo'yicha API Key olish
+EXPECTED_API_KEY = os.getenv("API_KEY", "default_secret_key_for_dev")
+
+async def get_api_key(api_key: str = Depends(api_key_header)):
+    """Swagger UI va HTTP Header orqali kelgan API Keyni tekshiruvchi funksiya"""
+    if api_key and api_key == EXPECTED_API_KEY:
+        return api_key
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Yaroqsiz yoki yo'qotilgan API Key (X-API-Key header yetishmayapti)"
+    )
 
 # --- 1. HYBRID DATABASE MANAGEMENT (SQLITE & POSTGRESQL) ---
 def get_db_connection():
@@ -192,7 +209,20 @@ async def lifespan(app: FastAPI):
     
     yield
 
-app = FastAPI(title="Enterprise InsurTech AI Security Platform", version="5.0.0", lifespan=lifespan)
+# --- FASTAPI SWAGGER UI METADATA ---
+app = FastAPI(
+    title="🛡️ Enterprise InsurTech AI Security Platform",
+    description="""
+    InsurTech sohasidagi AI modellar uchun xavfsizlik qalqoni (AI Guardrail System).
+    
+    ### Funksionallik:
+    * **API Key Auth:** Autentifikatsiya qilish uchun `Authorize` tugmasini bosing va kalitingizni kiritish lozim.
+    * **PII & Data Masking (DLP):** Karta raqamlari, Pasport, PINFL va VIN kodlarni yashirish.
+    * **Static & ML Filtering:** Prompt Injection va Firibgarlik harakatlarini bloklash.
+    """,
+    version="5.0.0",
+    lifespan=lifespan
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -202,10 +232,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Pydantic Modellari (Swagger UI Hujjatlari uchun)
 class AIRequest(BaseModel):
-    user_prompt: str
+    user_prompt: str = Field(
+        ..., 
+        example="KASKO sug'urtasi bo'yicha ma'lumot beramiz",
+        description="AI modeliga yuboriladigan foydalanuvchi matni"
+    )
 
-# --- 3. ADVANCED ENTERPRISE DLP (PIFI ISOLATION) ---
+class SecuritySuccessResponse(BaseModel):
+    status: str = Field("ALLOWED", example="ALLOWED")
+    clean_prompt_sent_to_ai: str = Field(..., example="KASKO sug'urtasi bo'yicha ma'lumot beramiz")
+    ai_risk_score: float = Field(..., example=0.0125)
+    ai_response: str = Field(..., example="InsurTech AI Javobi: '...' so'rovi xavfsiz deb topildi va qayta ishlandi.")
+
+# --- 3. ADVANCED ENTERPRISE DLP (PII ISOLATION) ---
 def sanitize_insurance_data(prompt: str) -> str:
     prompt = re.sub(r'\b(?:\d[ -]*?){13,16}\b', '[CREDIT_CARD_MASKED]', prompt)
     prompt = re.sub(r'[\w\.-]+@[\w\.-]+\.\w+', '[EMAIL_MASKED]', prompt)
@@ -260,7 +301,7 @@ def check_ml_attack(prompt: str) -> dict:
     }
 
 # --- 5. ENTERPRISE DASHBOARD UI ---
-@app.get("/dashboard", response_class=HTMLResponse)
+@app.get("/dashboard", response_class=HTMLResponse, include_in_schema=False)
 async def get_dashboard():
     stats = get_stats()
     logs_rows = ""
@@ -340,8 +381,14 @@ async def get_dashboard():
     </html>
     """
 
-# --- 6. PROTECTED API ENDPOINT ---
-@app.post("/v1/chat/protected")
+# --- 6. PROTECTED API ENDPOINT WITH AUTHENTICATION ---
+@app.post(
+    "/v1/chat/protected",
+    response_model=SecuritySuccessResponse,
+    summary="Prompt Xavfsizligini Tekshirish",
+    description="So'rovni DLP va ML tekshiruvlaridan o'tkazadi. **X-API-Key** talab qilinadi.",
+    dependencies=[Depends(get_api_key)]  # API Key Autentifikatsiya qatlami
+)
 async def protected_chat(request: AIRequest):
     try:
         raw_prompt = request.user_prompt
